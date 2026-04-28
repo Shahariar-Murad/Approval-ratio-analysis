@@ -72,8 +72,8 @@ def safe_ratio(numerator, denominator):
 
 
 @st.cache_data(show_spinner=False)
-def load_csv(uploaded_file) -> pd.DataFrame:
-    return pd.read_csv(uploaded_file, low_memory=False, encoding_errors="replace")
+def load_csv(file_bytes: bytes) -> pd.DataFrame:
+    return pd.read_csv(io.BytesIO(file_bytes), low_memory=False, encoding_errors="replace")
 
 
 def prepare_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -170,7 +170,7 @@ if uploaded is None:
     st.info("Upload your orchestrator CSV report to start the dashboard.")
     st.stop()
 
-raw = load_csv(uploaded)
+raw = load_csv(uploaded.read())
 data, mapping = prepare_data(raw)
 
 with st.sidebar:
@@ -190,6 +190,9 @@ filtered = data.copy()
 if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
     start, end = date_range
     filtered = filtered[(filtered["txn_date"].isna()) | ((filtered["txn_date"] >= start) & (filtered["txn_date"] <= end))]
+elif date_range and isinstance(date_range, date):
+    # User selected only a single date — treat as single-day filter
+    filtered = filtered[(filtered["txn_date"].isna()) | (filtered["txn_date"] == date_range)]
 if payment_types:
     filtered = filtered[filtered["payment_type"].isin(payment_types)]
 if countries:
@@ -251,11 +254,12 @@ for line in top_line_insights():
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Overview",
     "PSP Analysis",
     "Country Analysis",
     "Decline Reasons",
+    "MID Analysis",
     "Routing Insights",
     "Raw Data",
 ])
@@ -300,7 +304,7 @@ with tab3:
     st.dataframe(country_perf, use_container_width=True)
 
 with tab4:
-    declined = filtered[filtered["status_group"] != "Approved"].copy()
+    declined = filtered[filtered["status_group"] == "Declined"].copy()
     declined["decline_reason_clean"] = declined["decline_reason"].replace({"nan": "Unknown", "": "Unknown"})
     c1, c2 = st.columns(2)
     if not declined.empty:
@@ -336,6 +340,28 @@ with tab4:
         st.success("No declined attempts found under the current filters.")
 
 with tab5:
+    st.markdown("### MID-wise Performance")
+    mid_perf = unique_order_summary(filtered, ["mid"])
+    if not mid_perf.empty:
+        c1, c2 = st.columns(2)
+        fig = px.bar(
+            mid_perf.sort_values("approval_ratio_%", ascending=True),
+            x="approval_ratio_%", y="mid", orientation="h",
+            text="approval_ratio_%", title="MID-wise Approval Ratio",
+        )
+        fig.update_traces(texttemplate="%{text:.2f}%")
+        c1.plotly_chart(fig, use_container_width=True)
+        fig = px.scatter(
+            mid_perf, x="unique_orders", y="approval_ratio_%",
+            size="total_attempts", hover_name="mid",
+            title="MID: Volume vs Approval Ratio",
+        )
+        c2.plotly_chart(fig, use_container_width=True)
+        st.dataframe(mid_perf, use_container_width=True)
+    else:
+        st.info("No MID data available under the current filters.")
+
+with tab6:
     st.markdown("### Country-wise PSP Routing Recommendation")
     st.caption("Recommendation is based on best observed unique-order approval ratio by country and PSP. Always validate against cost, fraud risk, PSP limits, and compliance rules before changing routing.")
     if routing is not None and not routing.empty:
@@ -357,9 +383,9 @@ with tab5:
         """
     )
 
-with tab6:
+with tab7:
     st.markdown("### Column Mapping Used")
-    st.json(mapping)
+    st.json({k: v for k, v in mapping.items() if v is not None})
     st.markdown("### Filtered Data")
     st.dataframe(filtered, use_container_width=True)
     csv = filtered.to_csv(index=False).encode("utf-8")
